@@ -29,9 +29,11 @@ def check_password():
 
     if "password_correct" not in st.session_state:
         st.text_input("Podaj hasło dostępu:", type="password", on_change=password_entered, key="password")
+        st.info("Dane potrzebne do zalogowania znajdują się w Monday. Kontakt: jaroslaw.muzyka@performance-group.pl")
         return False
     elif not st.session_state["password_correct"]:
         st.text_input("Podaj hasło dostępu:", type="password", on_change=password_entered, key="password")
+        st.info("Dane potrzebne do zalogowania znajdują się w Monday. Kontakt: jaroslaw.muzyka@performance-group.pl")
         st.error("😕 Niepoprawne hasło")
         return False
     else:
@@ -135,13 +137,33 @@ def highlight_word_fuzzy(kw_word, text):
     return " ".join(result_parts)
 
 def highlight_text(text, keywords):
-    """Koloruje znalezione słowa na zielono, a resztę tekstu zostawia."""
+    """Koloruje znalezione słowa na zielono, zachowując oryginalną wielkość liter z tekstu."""
     if not isinstance(text, str): return ""
     highlighted = text
     sorted_kws = sorted(keywords, key=len, reverse=True)
     for kw in sorted_kws:
-        pattern = re.compile(re.escape(kw), re.IGNORECASE)
-        highlighted = pattern.sub(f"<span style='color:green; font-weight:bold'>{kw}</span>", highlighted)
+        # Używamy \g<0> by zach pwać oryginalne litery ze źródła (nie z frazy kluczowej)
+        pattern = re.compile(re.escape(normalize_string(kw)))
+        # Szukamy w znormalizowanej wersji, ale podmieniamy w oryginalnym tekście
+        norm_text = normalize_string(highlighted)
+        offset = 0
+        new_highlighted = ""
+        for m in pattern.finditer(norm_text):
+            start, end = m.start() + offset, m.end() + offset
+            orig_chunk = highlighted[start:end]
+            new_highlighted += highlighted[offset:start]
+            new_highlighted += f"<span style='color:green; font-weight:bold'>{orig_chunk}</span>"
+            offset = 0
+            highlighted = highlighted[:start] + "\x00" * (end - start) + highlighted[end:]
+        highlighted = highlighted.replace("\x00", "")
+        # Reset - szukamy prostszym sposobem z case-insensitive ale oryginalną treścią
+        highlighted = re.sub(
+            re.escape(kw),
+            lambda m_inner: f"<span style='color:green; font-weight:bold'>{m_inner.group(0)}</span>",
+            text,
+            flags=re.IGNORECASE
+        )
+        text = highlighted  # kolejne słowa iteruj po wyniku
     return highlighted
 
 def visualize_diff(original, new_val):
@@ -296,7 +318,7 @@ def load_and_process_data(file):
         df_grouped['AI Title'] = ""
         df_grouped['AI H1'] = ""
         df_grouped['AI Meta Description'] = ""
-        df_grouped['Generate'] = False # Checkbox do zaznaczania
+        df_grouped['Wygenerowano AI'] = ""  # Bedzie uzupelniane jako Title/H1/Meta po generacji
 
         return df_grouped
 
@@ -406,47 +428,56 @@ if uploaded_file:
         tab1, tab2, tab3 = st.tabs(["📊 Analiza Zbiorcza", "🔍 Analiza konkretnego URL", "⚙️ Edytuj Prompty"])
         
         with tab1:
-            # --- NAGŁÓWEK Z PRZYCISKIEM EKSPORTU ---
-            col_h1, col_h2 = st.columns([3, 1])
-            with col_h1:
+            # --- NAGLOWEK + PAGINACJA + EKSPORT W JEDNEJ LINII ---
+            total_items = len(df_view)
+            if 'current_page_no' not in st.session_state:
+                st.session_state['current_page_no'] = 1
+
+            hdr_c1, hdr_c2, hdr_c3, hdr_c4, hdr_c5, hdr_c6, hdr_c7 = st.columns([3, 1.2, 0.8, 0.8, 0.8, 1.5, 1.8])
+
+            with hdr_c1:
                 st.subheader(f"📊 Analiza ({len(df_view)} adresów URL)")
-            with col_h2:
+            with hdr_c2:
+                items_per_page = st.selectbox("Wierszy:", [10, 50, 100, 200, 500, 1000], index=2, key="ipp_top", label_visibility="collapsed")
+
+            total_pages = max(1, (total_items - 1) // items_per_page + 1) if total_items > 0 else 1
+            current_page = max(1, min(st.session_state['current_page_no'], total_pages))
+
+            with hdr_c3:
+                if st.button("◀", key="prev_page_top", disabled=(current_page <= 1), help="Poprzednia strona"):
+                    st.session_state['current_page_no'] = current_page - 1
+                    st.rerun()
+            with hdr_c4:
+                st.markdown(f"<div style='text-align:center;padding-top:8px'><b>{current_page}&nbsp;/&nbsp;{total_pages}</b></div>", unsafe_allow_html=True)
+            with hdr_c5:
+                if st.button("▶", key="next_page_top", disabled=(current_page >= total_pages), help="Następna strona"):
+                    st.session_state['current_page_no'] = current_page + 1
+                    st.rerun()
+            with hdr_c6:
+                start_idx = (current_page - 1) * items_per_page
+                end_idx = min(start_idx + items_per_page, total_items)
+                st.markdown(f"<div style='padding-top:8px;font-size:13px'><b>{start_idx+1}–{end_idx}</b> z <b>{total_items}</b></div>", unsafe_allow_html=True)
+            with hdr_c7:
+                df_export = st.session_state['df_main'].copy()
+                # Ustaw kolumnę Wygenerowano AI
+                def _gen_flag(r):
+                    parts = []
+                    if r['AI Title']: parts.append('Title')
+                    if r['AI H1']: parts.append('H1')
+                    if r['AI Meta Description']: parts.append('Meta')
+                    return ', '.join(parts) if parts else ''
+                df_export['Wygenerowano AI'] = df_export.apply(_gen_flag, axis=1)
+                export_cols = [c for c in df_export.columns if c not in ['All Keywords', 'Keyword_Info', 'Wygenerowano AI']] + ['Wygenerowano AI']
+                df_export = df_export[export_cols]
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                    st.session_state['df_main'].to_excel(writer, index=False, sheet_name='Analiza')
+                    df_export.to_excel(writer, index=False, sheet_name='Analiza')
                 st.download_button(
-                    label="📥 Pobierz wyniki (.xlsx)",
+                    label="📥 Pobierz .xlsx",
                     data=output.getvalue(),
                     file_name="meta_tags_analysis_ai.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
-
-            # --- PAGINACJA NAD TABELĄ ---
-            total_items = len(df_view)
-            pag_col1, pag_col2, pag_col3, pag_col4, pag_col5 = st.columns([2, 1, 1, 1, 2])
-
-            with pag_col1:
-                items_per_page = st.selectbox("Wierszy na stronę:", [10, 50, 100, 200, 500, 1000], index=2, key="ipp_top")
-
-            total_pages = max(1, (total_items - 1) // items_per_page + 1) if total_items > 0 else 1
-            if 'current_page_no' not in st.session_state:
-                st.session_state['current_page_no'] = 1
-            current_page = max(1, min(st.session_state['current_page_no'], total_pages))
-
-            with pag_col2:
-                if st.button("◀ Poprz.", key="prev_page_top", disabled=(current_page <= 1)):
-                    st.session_state['current_page_no'] = current_page - 1
-                    st.rerun()
-            with pag_col3:
-                st.markdown(f"<div style='text-align:center;padding-top:8px'><b>{current_page} / {total_pages}</b></div>", unsafe_allow_html=True)
-            with pag_col4:
-                if st.button("Nast. ▶", key="next_page_top", disabled=(current_page >= total_pages)):
-                    st.session_state['current_page_no'] = current_page + 1
-                    st.rerun()
-            with pag_col5:
-                start_idx = (current_page - 1) * items_per_page
-                end_idx = min(start_idx + items_per_page, total_items)
-                st.markdown(f"<div style='text-align:right;padding-top:8px;font-size:13px'>Wyświetlam <b>{start_idx+1}–{end_idx}</b> z <b>{total_items}</b></div>", unsafe_allow_html=True)
 
             start_idx = (current_page - 1) * items_per_page
             end_idx = min(start_idx + items_per_page, total_items)
@@ -572,25 +603,35 @@ if uploaded_file:
                 
                 st.markdown("<hr style='margin:15px 0; border-color:#eaeaea;'>", unsafe_allow_html=True)
 
-            # --- PAGINACJA I EXPORT POD TABELĄ ---
+            # --- DUPLIKAT PAGINACJI + EKSPORT POD TABELĄ ---
             st.markdown("<hr style='margin:10px 0;'>", unsafe_allow_html=True)
-            bot_c1, bot_c2, bot_c3, bot_c4 = st.columns([2, 1, 1, 2])
+            bot_c1, bot_c2, bot_c3, bot_c4, bot_c5, bot_c6 = st.columns([2, 0.8, 0.8, 0.8, 1.5, 1.8])
             with bot_c1:
-                st.markdown(f"<div style='padding-top:10px; font-size:13px;'><b>Wyświetlam {start_idx+1}–{end_idx} z {total_items}</b></div>", unsafe_allow_html=True)
+                st.markdown(f"<div style='padding-top:8px;font-size:13px'><b>{start_idx+1}–{end_idx}</b> z <b>{total_items}</b></div>", unsafe_allow_html=True)
             with bot_c2:
-                if st.button("◀ Poprzednia", key="prev_page_bot", disabled=(current_page <= 1)):
+                if st.button("◀", key="prev_page_bot", disabled=(current_page <= 1), help="Poprzednia strona"):
                     st.session_state['current_page_no'] = current_page - 1
                     st.rerun()
             with bot_c3:
-                if st.button("Następna ▶", key="next_page_bot", disabled=(current_page >= total_pages)):
+                st.markdown(f"<div style='text-align:center;padding-top:8px'><b>{current_page}&nbsp;/&nbsp;{total_pages}</b></div>", unsafe_allow_html=True)
+            with bot_c4:
+                if st.button("▶", key="next_page_bot", disabled=(current_page >= total_pages), help="Następna strona"):
                     st.session_state['current_page_no'] = current_page + 1
                     st.rerun()
-            with bot_c4:
+            with bot_c5:
+                pass  # spacer
+            with bot_c6:
+                df_export2 = st.session_state['df_main'].copy()
+                df_export2['Wygenerowano AI'] = df_export2.apply(
+                    lambda r: ', '.join([t for t, v in [('Title', r['AI Title']), ('H1', r['AI H1']), ('Meta', r['AI Meta Description'])] if v]), axis=1
+                )
+                export_cols2 = [c for c in df_export2.columns if c not in ['All Keywords', 'Keyword_Info', 'Wygenerowano AI']] + ['Wygenerowano AI']
+                df_export2 = df_export2[export_cols2]
                 output2 = io.BytesIO()
                 with pd.ExcelWriter(output2, engine='xlsxwriter') as writer:
-                    st.session_state['df_main'].to_excel(writer, index=False, sheet_name='Analiza')
+                    df_export2.to_excel(writer, index=False, sheet_name='Analiza')
                 st.download_button(
-                    label="📥 Pobierz wyniki (.xlsx)",
+                    label="📥 Pobierz .xlsx",
                     data=output2.getvalue(),
                     file_name="meta_tags_analysis_ai.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -599,74 +640,139 @@ if uploaded_file:
 
 
         with tab2:
-            # --- SZCZEGÓŁOWY PODGLĄD (INSPEKTOR) ---
+            # --- SZCZEGÓŁOWY PODGLĄD (INSPEKTOR) – 3 KOLUMNY ---
             st.subheader("🔍 Inspektor URL")
             inspect_url = st.selectbox("Wybierz adres URL do szczegółowej analizy i przegenerowania:", df_view['Current URL'].unique())
             
             if inspect_url:
-                # Bierzemy z df_main żeby odświeżał się po wciśnięciu Przegeneruj (Różdżki)
                 row_inspect = st.session_state['df_main'][st.session_state['df_main']['Current URL'] == inspect_url].iloc[0]
                 idx_main = st.session_state['df_main'].index[st.session_state['df_main']['Current URL'] == inspect_url].tolist()[0]
                 kws = row_inspect['All Keywords']
                 kw_infos = row_inspect['Keyword_Info']
-                
-                col_left, col_right = st.columns([2, 1])
-                with col_left:
-                    st.markdown("### Title 1")
-                    missing_t = get_missing_keywords(kws, row_inspect['Title 1'])
-                    st.markdown(f"**Obecny:** {highlight_text(str(row_inspect['Title 1']), kws)}", unsafe_allow_html=True)
+
+                # ===== TYTUŁ =====
+                st.markdown("---")
+                st.markdown("### 📝 Title")
+                current_title = str(row_inspect['Title 1'])
+                ai_title = str(row_inspect['AI Title']) if row_inspect['AI Title'] else ""
+                missing_t = get_missing_keywords(kws, current_title)
+
+                ic1, ic2, ic3 = st.columns(3)
+                with ic1:
+                    st.markdown("**🔵 Obecny:**")
+                    st.markdown(highlight_text(current_title, kws), unsafe_allow_html=True)
                     if missing_t:
-                        st.markdown(f"❌ **Brakuje:** {', '.join(missing_t)}")
+                        st.caption(f"❌ Brakuje: {', '.join(missing_t)}")
                     else:
-                        st.success("✅ Wszystkie słowa obecne")
-                    
-                    if row_inspect['AI Title']:
-                        st.markdown(f"<br>🤖 **AI (Diff):**<br> {visualize_diff(row_inspect['Title 1'], row_inspect['AI Title'])}", unsafe_allow_html=True)
-
-                    if st.button("🪄 Przegeneruj Title", key="wand_title"):
-                        if not api_key: st.error("⚠️ Podaj klucz API OpenAI")
+                        st.success("✅ Wszystkie frazy")
+                with ic2:
+                    st.markdown("**🤖 Wygenerowany AI:**")
+                    if ai_title:
+                        missing_ai_t = get_missing_keywords(kws, ai_title)
+                        st.markdown(highlight_text(ai_title, kws), unsafe_allow_html=True)
+                        if missing_ai_t:
+                            st.caption(f"❌ Brakuje: {', '.join(missing_ai_t)}")
                         else:
-                            with st.spinner("Generowanie..."):
-                                st.session_state['df_main'].at[idx_main, 'AI Title'] = generate_ai_content(row_inspect, "Title", language, api_key)
-                            st.rerun()
+                            st.success("✅ Wszystkie frazy")
+                    else:
+                        st.markdown("*— jeszcze nie wygenerowano*")
+                with ic3:
+                    st.markdown("**🔄 Różnica (AI vs Obecny):**")
+                    if ai_title:
+                        st.markdown(visualize_diff(current_title, ai_title), unsafe_allow_html=True)
+                    else:
+                        st.markdown("*—*")
+                if st.button("🪄 Przegeneruj Title", key="wand_title"):
+                    if not api_key: st.error("⚠️ Podaj klucz API OpenAI")
+                    else:
+                        with st.spinner("Generowanie..."):
+                            st.session_state['df_main'].at[idx_main, 'AI Title'] = generate_ai_content(row_inspect, "Title", language, api_key)
+                        st.rerun()
 
-                    st.markdown("---")
-                    st.markdown("### H1")
-                    missing_h = get_missing_keywords(kws, row_inspect['H1-1'])
-                    st.markdown(f"**Obecny:** {highlight_text(str(row_inspect['H1-1']), kws)}", unsafe_allow_html=True)
+                # ===== H1 =====
+                st.markdown("---")
+                st.markdown("### 📝 H1")
+                current_h1 = str(row_inspect['H1-1'])
+                ai_h1 = str(row_inspect['AI H1']) if row_inspect['AI H1'] else ""
+                missing_h = get_missing_keywords(kws, current_h1)
+
+                ih1, ih2, ih3 = st.columns(3)
+                with ih1:
+                    st.markdown("**🔵 Obecny:**")
+                    st.markdown(highlight_text(current_h1, kws), unsafe_allow_html=True)
                     if missing_h:
-                        st.markdown(f"❌ **Brakuje:** {', '.join(missing_h)}")
+                        st.caption(f"❌ Brakuje: {', '.join(missing_h)}")
                     else:
-                        st.success("✅ Wszystkie słowa obecne")
-                    
-                    if row_inspect['AI H1']:
-                        st.markdown(f"<br>🤖 **AI (Diff):**<br> {visualize_diff(row_inspect['H1-1'], row_inspect['AI H1'])}", unsafe_allow_html=True)
-
-                    if st.button("🪄 Przegeneruj H1", key="wand_h1"):
-                        if not api_key: st.error("⚠️ Podaj klucz API OpenAI")
+                        st.success("✅ Wszystkie frazy")
+                with ih2:
+                    st.markdown("**🤖 Wygenerowany AI:**")
+                    if ai_h1:
+                        missing_ai_h = get_missing_keywords(kws, ai_h1)
+                        st.markdown(highlight_text(ai_h1, kws), unsafe_allow_html=True)
+                        if missing_ai_h:
+                            st.caption(f"❌ Brakuje: {', '.join(missing_ai_h)}")
                         else:
-                            with st.spinner("Generowanie..."):
-                                st.session_state['df_main'].at[idx_main, 'AI H1'] = generate_ai_content(row_inspect, "H1", language, api_key)
-                            st.rerun()
+                            st.success("✅ Wszystkie frazy")
+                    else:
+                        st.markdown("*— jeszcze nie wygenerowano*")
+                with ih3:
+                    st.markdown("**🔄 Różnica (AI vs Obecny):**")
+                    if ai_h1:
+                        st.markdown(visualize_diff(current_h1, ai_h1), unsafe_allow_html=True)
+                    else:
+                        st.markdown("*—*")
+                if st.button("🪄 Przegeneruj H1", key="wand_h1"):
+                    if not api_key: st.error("⚠️ Podaj klucz API OpenAI")
+                    else:
+                        with st.spinner("Generowanie..."):
+                            st.session_state['df_main'].at[idx_main, 'AI H1'] = generate_ai_content(row_inspect, "H1", language, api_key)
+                        st.rerun()
 
-                    st.markdown("---")
-                    st.markdown("### Meta Description")
-                    st.markdown(f"**Obecny:** {str(row_inspect['Meta Description 1'])}")
-                    if row_inspect['AI Meta Description']:
-                        st.markdown(f"<br>🤖 **AI (Diff):**<br> {visualize_diff(row_inspect['Meta Description 1'], row_inspect['AI Meta Description'])}", unsafe_allow_html=True)
-                    
-                    if st.button("🪄 Przegeneruj Meta", key="wand_meta"):
-                        if not api_key: st.error("⚠️ Podaj klucz API OpenAI")
+                # ===== META DESCRIPTION =====
+                st.markdown("---")
+                st.markdown("### 📝 Meta Description")
+                current_meta = str(row_inspect['Meta Description 1'])
+                ai_meta = str(row_inspect['AI Meta Description']) if row_inspect['AI Meta Description'] else ""
+                missing_m = get_missing_keywords(kws, current_meta)
+
+                im1, im2, im3 = st.columns(3)
+                with im1:
+                    st.markdown("**🔵 Obecna:**")
+                    st.markdown(highlight_text(current_meta, kws), unsafe_allow_html=True)
+                    if missing_m:
+                        st.caption(f"❌ Brakuje: {', '.join(missing_m)}")
+                    else:
+                        st.success("✅ Wszystkie frazy")
+                with im2:
+                    st.markdown("**🤖 Wygenerowana AI:**")
+                    if ai_meta:
+                        missing_ai_m = get_missing_keywords(kws, ai_meta)
+                        st.markdown(highlight_text(ai_meta, kws), unsafe_allow_html=True)
+                        if missing_ai_m:
+                            st.caption(f"❌ Brakuje: {', '.join(missing_ai_m)}")
                         else:
-                            with st.spinner("Generowanie..."):
-                                st.session_state['df_main'].at[idx_main, 'AI Meta Description'] = generate_ai_content(row_inspect, "Meta Description", language, api_key)
-                            st.rerun()
+                            st.success("✅ Wszystkie frazy")
+                    else:
+                        st.markdown("*— jeszcze nie wygenerowano*")
+                with im3:
+                    st.markdown("**🔄 Różnica (AI vs Obecna):**")
+                    if ai_meta:
+                        st.markdown(visualize_diff(current_meta, ai_meta), unsafe_allow_html=True)
+                    else:
+                        st.markdown("*—*")
+                if st.button("🪄 Przegeneruj Meta", key="wand_meta"):
+                    if not api_key: st.error("⚠️ Podaj klucz API OpenAI")
+                    else:
+                        with st.spinner("Generowanie..."):
+                            st.session_state['df_main'].at[idx_main, 'AI Meta Description'] = generate_ai_content(row_inspect, "Meta Description", language, api_key)
+                        st.rerun()
 
-                with col_right:
-                    st.markdown("### Słowa Kluczowe")
-                    st.write(f"Suma wolumenu: **{row_inspect['Volume']}**")
-                    for kwi in kw_infos:
-                        st.markdown(f"- {kwi}")
+                # ===== FRAZY KLUCZOWE =====
+                st.markdown("---")
+                st.markdown("### 📊 Frazy kluczowe")
+                st.write(f"Suma wolumenu: **{row_inspect['Volume']}**")
+                for kwi in kw_infos:
+                    st.markdown(f"- {kwi}")
 
         with tab3:
             st.subheader("⚙️ Edytuj Prompty Systemowe")
