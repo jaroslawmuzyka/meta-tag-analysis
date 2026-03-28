@@ -4,6 +4,8 @@ import openai
 import io
 import re
 import numpy as np
+import difflib
+import os
 
 # --- KONFIGURACJA STRONY I HASŁA ---
 st.set_page_config(page_title="Meta Tag AI Analyzer", page_icon="🤖", layout="wide")
@@ -81,6 +83,28 @@ def highlight_text(text, keywords):
         
     return highlighted
 
+def visualize_diff(original, new_val):
+    if not isinstance(original, str): original = ""
+    if not isinstance(new_val, str): new_val = ""
+    
+    orig_words = original.split()
+    new_words = new_val.split()
+    
+    matcher = difflib.SequenceMatcher(None, orig_words, new_words)
+    diff_html = ""
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == 'replace':
+            diff_html += f"<span style='color:red; text-decoration:line-through;'>{' '.join(orig_words[i1:i2])}</span> "
+            diff_html += f"<span style='color:green; font-weight:bold;'>{' '.join(new_words[j1:j2])}</span> "
+        elif tag == 'delete':
+            diff_html += f"<span style='color:red; text-decoration:line-through;'>{' '.join(orig_words[i1:i2])}</span> "
+        elif tag == 'insert':
+            diff_html += f"<span style='color:green; font-weight:bold;'>{' '.join(new_words[j1:j2])}</span> "
+        elif tag == 'equal':
+            diff_html += f"{' '.join(orig_words[i1:i2])} "
+            
+    return diff_html.strip()
+
 # --- FUNKCJE OPENAI (LOGIKA Z PHP PRZENIESIONA DO PYTHON) ---
 
 def ask_openai(prompt, api_key, model="gpt-4o-mini"):
@@ -100,24 +124,37 @@ def ask_openai(prompt, api_key, model="gpt-4o-mini"):
 def generate_ai_content(row, type_gen, language, api_key):
     """Generuje Title, H1 lub Meta Description."""
     keywords = row['All Keywords'] # To jest lista
+    url = row['Current URL']
     current_val = ""
+    kw_str = ", ".join(keywords)
+    missing_str = ""
     
     if type_gen == 'Title':
         current_val = row['Title 1']
-        prompt = f"Biorąc pod uwagę słowa kluczowe: {', '.join(keywords)}, zasugeruj tytuł w języku {language}. Wykorzystaj frazy z obecnego tytułu: '{current_val}' oraz brakujące słowa kluczowe. Nie kończ kropką. Max 60 znaków. Tylko treść tytułu."
-    
+        missing_str = ", ".join(get_missing_keywords(keywords, current_val))
     elif type_gen == 'H1':
         current_val = row['H1-1']
         missing = get_missing_keywords(keywords, current_val)
-        # Jeśli nie ma brakujących, zwróć obecny
         if not missing:
             return current_val
-        
-        prompt = f"Zaproponuj nagłówek H1 w języku {language} dla strony. Obecny H1: '{current_val}'. Brakujące słowa (posortowane wg ważności): {', '.join(missing)}. Nowy H1 musi zawierać stary H1 i naturalnie wpleść brakujące frazy. Bez cudzysłowów."
-
+        missing_str = ", ".join(missing)
     elif type_gen == 'Meta Description':
         current_val = row['Meta Description 1']
-        prompt = f"Zasugeruj meta opis w języku {language} zawierający słowa: {', '.join(keywords)}. Wykorzystaj kontekst z obecnego opisu: '{current_val}'. Długość ok. 150-160 znaków. Zachęcający do kliknięcia (CTR). Tylko treść."
+        missing_str = ", ".join(get_missing_keywords(keywords, current_val))
+
+    custom_prompts = st.session_state.get('custom_prompts', {})
+    prompt_template = custom_prompts.get(type_gen, "")
+    
+    if not prompt_template:
+        return f"Error: Brak szablonu promptu dla {type_gen}!"
+
+    prompt = prompt_template.format(
+        url=url,
+        kw_str=kw_str,
+        current_val=current_val,
+        language=language,
+        missing_str=missing_str
+    )
 
     return ask_openai(prompt, api_key)
 
@@ -130,6 +167,7 @@ def load_and_process_data(file):
         col_map = {
             'Keyword': ['Keyword', 'Słowo kluczowe', 'Phrase'],
             'Volume': ['Volume', 'Wolumen'],
+            'Current position': ['Current position', 'Position', 'Pozycja'],
             'Current URL': ['Current URL', 'URL', 'Adres'],
             'Title 1': ['Title 1', 'Title', 'Tytuł'],
             'H1-1': ['H1-1', 'H1', 'Nagłówek 1'],
@@ -146,7 +184,6 @@ def load_and_process_data(file):
                     found = True
                     break
             if not found:
-                # Opcjonalnie: jeśli brakuje kolumny, stwórz pustą
                 actual_cols[key] = key
                 df[key] = ""
 
@@ -158,10 +195,27 @@ def load_and_process_data(file):
         for c in text_cols:
             df[c] = df[c].fillna("").astype(str)
 
-        # GRUPOWANIE PO URL (Kluczowa zmiana względem PHP)
-        # Zamiast wiersz po wierszu, grupujemy słowa kluczowe dla jednego URL
+        # Bezpieczna konwersja liczb
+        if 'Volume' in df.columns:
+            df['Volume'] = pd.to_numeric(df['Volume'], errors='coerce').fillna(0)
+        else:
+            df['Volume'] = 0
+            
+        if 'Current position' in df.columns:
+            df['Current position'] = pd.to_numeric(df['Current position'], errors='coerce').fillna(100)
+        else:
+            df['Current position'] = 100
+
+        # Nowa kolumna opisowa zawierająca słowo kluczowe, pozycję i wolumen
+        df['Keyword_Info'] = df.apply(lambda r: f"{r['Keyword']} (poz: {int(r['Current position'])}, vol: {int(r['Volume'])})", axis=1)
+
+        # Sortowanie wewnętrznie przed grupowaniem, od największego wolumenu
+        df = df.sort_values(by=['Current URL', 'Volume'], ascending=[True, False])
+
+        # GRUPOWANIE PO URL
         df_grouped = df.groupby('Current URL').agg({
             'Keyword': lambda x: list(x),
+            'Keyword_Info': lambda x: list(x),
             'Volume': 'sum', # Suma wolumenu dla wszystkich fraz URL-a
             'Title 1': 'first',
             'H1-1': 'first',
@@ -169,6 +223,9 @@ def load_and_process_data(file):
         }).reset_index()
 
         df_grouped.rename(columns={'Keyword': 'All Keywords'}, inplace=True)
+        
+        # Sortowanie po całkowitym wolumenie per adres URL zeby najwazniejsze strony byly u góry
+        df_grouped = df_grouped.sort_values('Volume', ascending=False).reset_index(drop=True)
         
         # Dodanie kolumn na AI (puste na start)
         df_grouped['AI Title'] = ""
@@ -181,6 +238,20 @@ def load_and_process_data(file):
     except Exception as e:
         st.error(f"Błąd przetwarzania pliku: {e}")
         return None
+
+# --- DOMYŚLNE PROMPTY ---
+default_prompt_title = "Biorąc pod uwagę URL: {url} i słowa kluczowe: {kw_str}, zasugeruj ulepszony tytuł (Title) w języku {language}. Wykorzystaj frazy z obecnego tytułu: '{current_val}' i zgrabnie wpleść brakujące. Stwórz naturalny tekst. Unikaj chamskiego upychania słów kluczowych (keyword stuffingu), ale postaraj się zawrzeć brakujące słowa kluczowe. Przeanalizuj adres URL, aby zachować sens i intencję podstrony. Nie kończ kropką. Max 60 znaków. Tylko treść tytułu."
+
+default_prompt_h1 = "Zaproponuj nagłówek H1 w języku {language} dla URL: {url}. Obecny H1: '{current_val}'. Brakujące słowa kluczowe: {missing_str}. Nowy H1 musi naturalnie wpleść te frazy, opierając się na starym H1. Stwórz naturalny tekst. Unikaj chamskiego upychania słów kluczowych (keyword stuffingu), ale postaraj się zawrzeć brakujące słowa kluczowe. Przeanalizuj adres URL, aby zachować sens i intencję podstrony. Tylko treść."
+
+default_prompt_meta = "Zasugeruj zachęcający meta opis w języku {language} dla URL: {url} (słowa kluczowe: {kw_str}). Obecny opis: '{current_val}'. Stwórz naturalny tekst. Unikaj chamskiego upychania słów kluczowych (keyword stuffingu), ale postaraj się zawrzeć brakujące słowa kluczowe. Przeanalizuj adres URL, aby zachować sens i intencję podstrony. Długość ok. 150-160 znaków. Tylko treść."
+
+if 'custom_prompts' not in st.session_state:
+    st.session_state['custom_prompts'] = {
+        'Title': default_prompt_title,
+        'H1': default_prompt_h1,
+        'Meta Description': default_prompt_meta
+    }
 
 # --- UI GŁÓWNE ---
 
@@ -229,6 +300,11 @@ with st.sidebar:
     hide_empty_h1 = st.checkbox("Ukryj puste H1", value=False)
     hide_optimized = st.checkbox("Ukryj w pełni zoptymalizowane", value=False, help="Ukrywa wiersze, gdzie wszystkie słowa kluczowe występują w Title i H1")
 
+import os
+if os.path.exists("przykladowy-plik.xlsx"):
+    with open("przykladowy-plik.xlsx", "rb") as file:
+        st.download_button(label="📥 Pobierz przykładowy plik Excel", data=file, file_name="przykladowy-plik.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 uploaded_file = st.file_uploader("Wybierz plik XLSX", type=['xlsx'])
 
 if uploaded_file:
@@ -256,122 +332,170 @@ if uploaded_file:
         if hide_optimized:
              df_view = df_view[(df_view['Missing in Title'] > 0) | (df_view['Missing in H1'] > 0)]
 
-        # --- GŁÓWNA TABELA (DATA EDITOR) ---
-        st.subheader(f"📊 Analiza ({len(df_view)} adresów URL)")
+        # TWORZYMY ZAKŁADKI W UI
+        tab1, tab2, tab3 = st.tabs(["📊 Analiza Zbiorcza", "🔍 Inspektor URL (Różdżka i Detale)", "⚙️ Edytuj Prompty"])
         
-        column_config = {
-            "Generate": st.column_config.CheckboxColumn("Zaznacz", help="Zaznacz do generowania AI", default=False),
-            "Current URL": st.column_config.LinkColumn("URL"),
-            "Volume": st.column_config.NumberColumn("Total Vol", format="%d"),
-            "All Keywords": st.column_config.ListColumn("Keywords"),
-            "Title 1": st.column_config.TextColumn("Current Title", width="medium"),
-            "H1-1": st.column_config.TextColumn("Current H1", width="medium"),
-            "AI Title": st.column_config.TextColumn("AI Title (New)", width="medium"),
-            "AI H1": st.column_config.TextColumn("AI H1 (New)", width="medium"),
-        }
-        
-        # Wyświetlamy edytowalną tabelę
-        edited_df = st.data_editor(
-            df_view,
-            column_config=column_config,
-            use_container_width=True,
-            hide_index=True,
-            disabled=["Current URL", "Volume", "All Keywords", "Missing in Title", "Missing in H1"], # Czego nie można edytować ręcznie
-            column_order=["Generate", "Current URL", "Volume", "All Keywords", "Title 1", "AI Title", "H1-1", "AI H1", "Meta Description 1", "AI Meta Description"]
-        )
-
-        # Aktualizacja stanu po edycji (np. zaznaczenie checkboxów)
-        # Musimy zaktualizować główny DataFrame w session_state na podstawie edycji w widoku
-        # Uwaga: Pandas index matching jest kluczowy
-        st.session_state['df_main'].update(edited_df)
-
-        # --- SEKCJA GENEROWANIA AI ---
-        st.divider()
-        col_gen1, col_gen2, col_gen3 = st.columns(3)
-        
-        selected_rows = edited_df[edited_df['Generate'] == True]
-        count_selected = len(selected_rows)
-
-        if not api_key:
-            st.warning("⚠️ Podaj klucz API OpenAI w ustawieniach, aby korzystać z generatora.")
-        else:
-            with col_gen1:
-                if st.button(f"✨ Generuj Title ({count_selected})"):
-                    if count_selected == 0:
-                        st.warning("Zaznacz wiersze w kolumnie 'Generate'")
-                    else:
-                        progress_bar = st.progress(0)
-                        for idx, (index, row) in enumerate(selected_rows.iterrows()):
-                            new_val = generate_ai_content(row, "Title", language, api_key)
-                            # Aktualizacja w głównym DF
-                            st.session_state['df_main'].at[index, 'AI Title'] = new_val
-                            progress_bar.progress((idx + 1) / count_selected)
-                        st.rerun()
-
-            with col_gen2:
-                if st.button(f"✨ Generuj H1 ({count_selected})"):
-                    if count_selected == 0:
-                        st.warning("Zaznacz wiersze")
-                    else:
-                        progress_bar = st.progress(0)
-                        for idx, (index, row) in enumerate(selected_rows.iterrows()):
-                            new_val = generate_ai_content(row, "H1", language, api_key)
-                            st.session_state['df_main'].at[index, 'AI H1'] = new_val
-                            progress_bar.progress((idx + 1) / count_selected)
-                        st.rerun()
-
-            with col_gen3:
-                if st.button(f"✨ Generuj Meta Desc ({count_selected})"):
-                    if count_selected == 0:
-                        st.warning("Zaznacz wiersze")
-                    else:
-                        progress_bar = st.progress(0)
-                        for idx, (index, row) in enumerate(selected_rows.iterrows()):
-                            new_val = generate_ai_content(row, "Meta Description", language, api_key)
-                            st.session_state['df_main'].at[index, 'AI Meta Description'] = new_val
-                            progress_bar.progress((idx + 1) / count_selected)
-                        st.rerun()
-
-        # --- SZCZEGÓŁOWY PODGLĄD (INSPEKTOR) ---
-        st.divider()
-        st.subheader("🔍 Inspektor URL")
-        
-        # Wybór URL do analizy szczegółowej
-        inspect_url = st.selectbox("Wybierz adres URL do szczegółowej analizy:", df_view['Current URL'].unique())
-        
-        if inspect_url:
-            row_inspect = df_view[df_view['Current URL'] == inspect_url].iloc[0]
-            kws = row_inspect['All Keywords']
+        with tab1:
+            # --- GŁÓWNA TABELA (DATA EDITOR) ---
+            st.subheader(f"📊 Analiza ({len(df_view)} adresów URL)")
             
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                st.markdown("### Title")
-                missing_t = get_missing_keywords(kws, row_inspect['Title 1'])
-                st.markdown(f"**Obecny:** {highlight_text(row_inspect['Title 1'], kws)}", unsafe_allow_html=True)
-                if missing_t:
-                    st.markdown(f"❌ **Brakuje:** {', '.join(missing_t)}")
-                else:
-                    st.success("✅ Wszystkie słowa obecne")
-                
-                if row_inspect['AI Title']:
-                    st.info(f"🤖 **AI:** {row_inspect['AI Title']}")
+            column_config = {
+                "Generate": st.column_config.CheckboxColumn("Zaznacz", help="Zaznacz do generowania AI", default=False),
+                "Current URL": st.column_config.LinkColumn("URL"),
+                "Volume": st.column_config.NumberColumn("Total Vol", format="%d"),
+                "Keyword_Info": st.column_config.ListColumn("Fazy (poz, vol)"),
+                "All Keywords": st.column_config.ListColumn("Keywords"),
+                "Title 1": st.column_config.TextColumn("Current Title", width="medium"),
+                "H1-1": st.column_config.TextColumn("Current H1", width="medium"),
+                "AI Title": st.column_config.TextColumn("AI Title (New)", width="medium"),
+                "AI H1": st.column_config.TextColumn("AI H1 (New)", width="medium"),
+            }
+            
+            # Wyświetlamy edytowalną tabelę
+            edited_df = st.data_editor(
+                df_view,
+                column_config=column_config,
+                use_container_width=True,
+                hide_index=True,
+                disabled=["Current URL", "Volume", "All Keywords", "Keyword_Info", "Missing in Title", "Missing in H1"], 
+                column_order=["Generate", "Current URL", "Volume", "Keyword_Info", "Title 1", "AI Title", "H1-1", "AI H1", "Meta Description 1", "AI Meta Description"]
+            )
 
-            with c2:
-                st.markdown("### H1")
-                missing_h = get_missing_keywords(kws, row_inspect['H1-1'])
-                st.markdown(f"**Obecny:** {highlight_text(row_inspect['H1-1'], kws)}", unsafe_allow_html=True)
-                if missing_h:
-                    st.markdown(f"❌ **Brakuje:** {', '.join(missing_h)}")
-                else:
-                    st.success("✅ Wszystkie słowa obecne")
-                
-                if row_inspect['AI H1']:
-                    st.info(f"🤖 **AI:** {row_inspect['AI H1']}")
+            st.session_state['df_main'].update(edited_df)
 
-            with c3:
-                st.markdown("### Słowa Kluczowe")
-                st.write(f"Suma wolumenu: **{row_inspect['Volume']}**")
-                st.write(", ".join(kws))
+            # --- SEKCJA GENEROWANIA AI ---
+            st.divider()
+            col_gen1, col_gen2, col_gen3 = st.columns(3)
+            
+            selected_rows = edited_df[edited_df['Generate'] == True]
+            count_selected = len(selected_rows)
+
+            if not api_key:
+                st.warning("⚠️ Podaj klucz API OpenAI w ustawieniach, aby korzystać z generatora.")
+            else:
+                with col_gen1:
+                    if st.button(f"✨ Generuj Title ({count_selected})"):
+                        if count_selected == 0:
+                            st.warning("Zaznacz wiersze w kolumnie 'Generate'")
+                        else:
+                            progress_bar = st.progress(0)
+                            for idx, (index, row) in enumerate(selected_rows.iterrows()):
+                                new_val = generate_ai_content(row, "Title", language, api_key)
+                                st.session_state['df_main'].at[index, 'AI Title'] = new_val
+                                progress_bar.progress((idx + 1) / count_selected)
+                            st.rerun()
+
+                with col_gen2:
+                    if st.button(f"✨ Generuj H1 ({count_selected})"):
+                        if count_selected == 0:
+                            st.warning("Zaznacz wiersze")
+                        else:
+                            progress_bar = st.progress(0)
+                            for idx, (index, row) in enumerate(selected_rows.iterrows()):
+                                new_val = generate_ai_content(row, "H1", language, api_key)
+                                st.session_state['df_main'].at[index, 'AI H1'] = new_val
+                                progress_bar.progress((idx + 1) / count_selected)
+                            st.rerun()
+
+                with col_gen3:
+                    if st.button(f"✨ Generuj Meta Desc ({count_selected})"):
+                        if count_selected == 0:
+                            st.warning("Zaznacz wiersze")
+                        else:
+                            progress_bar = st.progress(0)
+                            for idx, (index, row) in enumerate(selected_rows.iterrows()):
+                                new_val = generate_ai_content(row, "Meta Description", language, api_key)
+                                st.session_state['df_main'].at[index, 'AI Meta Description'] = new_val
+                                progress_bar.progress((idx + 1) / count_selected)
+                            st.rerun()
+
+        with tab2:
+            # --- SZCZEGÓŁOWY PODGLĄD (INSPEKTOR) ---
+            st.subheader("🔍 Inspektor URL")
+            inspect_url = st.selectbox("Wybierz adres URL do szczegółowej analizy i przegenerowania:", df_view['Current URL'].unique())
+            
+            if inspect_url:
+                # Bierzemy z df_main żeby odświeżał się po wciśnięciu Przegeneruj (Różdżki)
+                row_inspect = st.session_state['df_main'][st.session_state['df_main']['Current URL'] == inspect_url].iloc[0]
+                idx_main = st.session_state['df_main'].index[st.session_state['df_main']['Current URL'] == inspect_url].tolist()[0]
+                kws = row_inspect['All Keywords']
+                kw_infos = row_inspect['Keyword_Info']
+                
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    st.markdown("### Title 1")
+                    missing_t = get_missing_keywords(kws, row_inspect['Title 1'])
+                    st.markdown(f"**Obecny:** {highlight_text(row_inspect['Title 1'], kws)}", unsafe_allow_html=True)
+                    if missing_t:
+                        st.markdown(f"❌ **Brakuje:** {', '.join(missing_t)}")
+                    else:
+                        st.success("✅ Wszystkie słowa obecne")
+                    
+                    if row_inspect['AI Title']:
+                        st.markdown(f"<br>🤖 **AI (Diff):**<br> {visualize_diff(row_inspect['Title 1'], row_inspect['AI Title'])}", unsafe_allow_html=True)
+
+                    if st.button("🪄 Przegeneruj Title", key="wand_title"):
+                        if not api_key: st.error("⚠️ Podaj klucz API OpenAI")
+                        else:
+                            with st.spinner("Generowanie..."):
+                                st.session_state['df_main'].at[idx_main, 'AI Title'] = generate_ai_content(row_inspect, "Title", language, api_key)
+                            st.rerun()
+
+                with c2:
+                    st.markdown("### H1")
+                    missing_h = get_missing_keywords(kws, row_inspect['H1-1'])
+                    st.markdown(f"**Obecny:** {highlight_text(row_inspect['H1-1'], kws)}", unsafe_allow_html=True)
+                    if missing_h:
+                        st.markdown(f"❌ **Brakuje:** {', '.join(missing_h)}")
+                    else:
+                        st.success("✅ Wszystkie słowa obecne")
+                    
+                    if row_inspect['AI H1']:
+                        st.markdown(f"<br>🤖 **AI (Diff):**<br> {visualize_diff(row_inspect['H1-1'], row_inspect['AI H1'])}", unsafe_allow_html=True)
+
+                    if st.button("🪄 Przegeneruj H1", key="wand_h1"):
+                        if not api_key: st.error("⚠️ Podaj klucz API OpenAI")
+                        else:
+                            with st.spinner("Generowanie..."):
+                                st.session_state['df_main'].at[idx_main, 'AI H1'] = generate_ai_content(row_inspect, "H1", language, api_key)
+                            st.rerun()
+
+                with c3:
+                    st.markdown("### Słowa Kluczowe")
+                    st.write(f"Suma wolumenu: **{row_inspect['Volume']}**")
+                    for kwi in kw_infos:
+                        st.markdown(f"- {kwi}")
+
+                    st.markdown("---")
+                    st.markdown("### Meta Description")
+                    st.markdown(f"**Obecny:** {row_inspect['Meta Description 1']}")
+                    if row_inspect['AI Meta Description']:
+                        st.markdown(f"<br>🤖 **AI (Diff):**<br> {visualize_diff(row_inspect['Meta Description 1'], row_inspect['AI Meta Description'])}", unsafe_allow_html=True)
+                    
+                    if st.button("🪄 Przegeneruj Meta", key="wand_meta"):
+                        if not api_key: st.error("⚠️ Podaj klucz API OpenAI")
+                        else:
+                            with st.spinner("Generowanie..."):
+                                st.session_state['df_main'].at[idx_main, 'AI Meta Description'] = generate_ai_content(row_inspect, "Meta Description", language, api_key)
+                            st.rerun()
+
+        with tab3:
+            st.subheader("⚙️ Edytuj Prompty Systemowe")
+            st.info("Dostosuj instrukcje wysyłane do modelu OpenAI. Dostępne zmienne w nawiasach klamrowych: \n- `{url}` - adres URL\n- `{kw_str}` - wszystkie słowa kluczowe po przecinku\n- `{current_val}` - obecny element, np. stary Title\n- `{language}` - wybrany język np. pl\n- `{missing_str}` - brakujące słowa kluczowe (szczególnie przydatne w H1)")
+            
+            c_prompts = st.session_state['custom_prompts']
+            
+            new_title = st.text_area("✍️ Prompt dla Title", value=c_prompts.get('Title', ''), height=180)
+            new_h1 = st.text_area("✍️ Prompt dla H1", value=c_prompts.get('H1', ''), height=180)
+            new_meta = st.text_area("✍️ Prompt dla Meta Description", value=c_prompts.get('Meta Description', ''), height=180)
+            
+            if st.button("💾 Zapisz Prompty"):
+                st.session_state['custom_prompts'] = {
+                    'Title': new_title,
+                    'H1': new_h1,
+                    'Meta Description': new_meta
+                }
+                st.success("Prompty zostały zaktualizowane! Teraz Magiczna Różdżka i Tablica Zbiorcza będzie korzystać z nowych instrukcji.")
 
         # --- EKSPORT ---
         st.divider()
