@@ -219,7 +219,7 @@ def load_and_process_data(file):
         # GRUPOWANIE PO URL
         df_grouped = df.groupby('Current URL').agg({
             'Keyword': lambda x: list(x),
-            'Keyword_Info': lambda x: " | ".join(list(x)),
+            'Keyword_Info': lambda x: list(x),
             'Volume': 'sum', # Suma wolumenu dla wszystkich fraz URL-a
             'Title 1': 'first',
             'H1-1': 'first',
@@ -227,6 +227,22 @@ def load_and_process_data(file):
         }).reset_index()
 
         df_grouped.rename(columns={'Keyword': 'All Keywords'}, inplace=True)
+        
+        def build_kw_info(row):
+            def check_kw(kw, text):
+                if not isinstance(text, str): return False
+                pattern = re.compile(r'\b' + re.escape(kw) + r'\b', re.IGNORECASE)
+                return bool(pattern.search(text))
+            
+            res = []
+            for kwi, kw_word in zip(row['Keyword_Info'], row['All Keywords']):
+                t = "✅" if check_kw(kw_word, row['Title 1']) else "❌"
+                h = "✅" if check_kw(kw_word, row['H1-1']) else "❌"
+                m = "✅" if check_kw(kw_word, row['Meta Description 1']) else "❌"
+                res.append(f"{kwi} [Title: {t} H1: {h} Meta: {m}]")
+            return res
+            
+        df_grouped['Keyword_Info'] = df_grouped.apply(build_kw_info, axis=1)
         
         # Sortowanie po całkowitym wolumenie per adres URL zeby najwazniejsze strony byly u góry
         df_grouped = df_grouped.sort_values('Volume', ascending=False).reset_index(drop=True)
@@ -355,71 +371,38 @@ if uploaded_file:
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
 
-            # --- WŁASNA TABELA HTML (frazy jako lista punktowana) ---
-            def build_html_table(df):
-                rows_html = ""
-                for _, row in df.iterrows():
-                    kw_items = row['Keyword_Info'].split(" | ")
-                    kw_html = "<br>".join(
-                        f"<span style='white-space:nowrap'>{kw}</span>" for kw in kw_items
-                    )
+            column_config = {
+                "Generate": st.column_config.CheckboxColumn("Zaznacz", help="Zaznacz do generowania AI", default=False),
+                "Current URL": st.column_config.LinkColumn("URL"),
+                "Volume": st.column_config.NumberColumn("Total Vol", format="%d"),
+                "Keyword_Info": st.column_config.ListColumn("Frazy i Pokrycie (T/H/M)"),
+                "All Keywords": st.column_config.ListColumn("Keywords"),
+                "Title 1": st.column_config.TextColumn("Current Title", width="medium"),
+                "H1-1": st.column_config.TextColumn("Current H1", width="medium"),
+                "Meta Description 1": st.column_config.TextColumn("Current Meta Desc", width="medium"),
+                "AI Title": st.column_config.TextColumn("AI Title", width="medium"),
+                "AI H1": st.column_config.TextColumn("AI H1", width="medium"),
+                "AI Meta Description": st.column_config.TextColumn("AI Meta", width="medium"),
+            }
+            
+            # Wyświetlamy edytowalną tabelę
+            edited_df = st.data_editor(
+                df_view,
+                column_config=column_config,
+                use_container_width=True,
+                hide_index=True,
+                disabled=["Current URL", "Volume", "All Keywords", "Keyword_Info", "Missing in Title", "Missing in H1"], 
+                column_order=["Generate", "Current URL", "Volume", "Keyword_Info", "Title 1", "AI Title", "H1-1", "AI H1", "Meta Description 1", "AI Meta Description"]
+            )
 
-                    missing_t = len(get_missing_keywords(row['All Keywords'], row['Title 1']))
-                    missing_h = len(get_missing_keywords(row['All Keywords'], row['H1-1']))
-                    badge_t = f"<span style='color:red'>❌ {missing_t} brak.</span>" if missing_t else "<span style='color:green'>✅</span>"
-                    badge_h = f"<span style='color:red'>❌ {missing_h} brak.</span>" if missing_h else "<span style='color:green'>✅</span>"
-
-                    ai_title_html = f"<span style='color:#1a7a3c'>{row['AI Title']}</span>" if row['AI Title'] else "<span style='color:#aaa'>—</span>"
-                    ai_h1_html = f"<span style='color:#1a7a3c'>{row['AI H1']}</span>" if row['AI H1'] else "<span style='color:#aaa'>—</span>"
-
-                    rows_html += f"""
-                    <tr style='border-bottom:1px solid #e0e0e0; vertical-align:top;'>
-                        <td style='padding:8px; max-width:220px; word-break:break-all; font-size:12px;'>
-                            <a href='{row["Current URL"]}' target='_blank' style='color:#1a73e8'>{row['Current URL']}</a>
-                        </td>
-                        <td style='padding:8px; text-align:center; font-weight:bold;'>{int(row['Volume'])}</td>
-                        <td style='padding:8px; font-size:12px;'>{kw_html}</td>
-                        <td style='padding:8px; font-size:12px;'>{row['Title 1']}<br>{badge_t}</td>
-                        <td style='padding:8px; font-size:12px; color:#1a7a3c'>{ai_title_html}</td>
-                        <td style='padding:8px; font-size:12px;'>{row['H1-1']}<br>{badge_h}</td>
-                        <td style='padding:8px; font-size:12px;'>{ai_h1_html}</td>
-                    </tr>"""
-
-                return f"""
-                <style>
-                    .meta-table {{ border-collapse:collapse; width:100%; font-family:sans-serif; }}
-                    .meta-table th {{ background:#f0f2f6; padding:10px 8px; text-align:left; font-size:13px; border-bottom:2px solid #ccc; }}
-                    .meta-table tr:hover {{ background:#fafafa; }}
-                </style>
-                <div style='overflow-x:auto'>
-                <table class='meta-table'>
-                    <thead><tr>
-                        <th>URL</th>
-                        <th>Vol.</th>
-                        <th>Frazy (poz, vol)</th>
-                        <th>Current Title</th>
-                        <th>AI Title</th>
-                        <th>Current H1</th>
-                        <th>AI H1</th>
-                    </tr></thead>
-                    <tbody>{rows_html}</tbody>
-                </table>
-                </div>"""
-
-            st.markdown(build_html_table(df_view), unsafe_allow_html=True)
+            st.session_state['df_main'].update(edited_df)
 
             # --- SEKCJA GENEROWANIA AI ---
             st.divider()
-            all_urls = df_view['Current URL'].tolist()
-            selected_urls = st.multiselect(
-                "🎯 Wybierz URL-e do generowania AI:",
-                options=all_urls,
-                placeholder="Zaznacz jeden lub więcej adresów URL..."
-            )
-            selected_rows = df_view[df_view['Current URL'].isin(selected_urls)]
-            count_selected = len(selected_rows)
-
             col_gen1, col_gen2, col_gen3 = st.columns(3)
+            
+            selected_rows = edited_df[edited_df['Generate'] == True]
+            count_selected = len(selected_rows)
 
             if not api_key:
                 st.warning("⚠️ Podaj klucz API OpenAI w ustawieniach, aby korzystać z generatora.")
@@ -427,7 +410,7 @@ if uploaded_file:
                 with col_gen1:
                     if st.button(f"✨ Generuj Title ({count_selected})"):
                         if count_selected == 0:
-                            st.warning("Wybierz URL-e z listy powyżej")
+                            st.warning("Zaznacz wiersze w kolumnie 'Generate'")
                         else:
                             progress_bar = st.progress(0)
                             for idx, (index, row) in enumerate(selected_rows.iterrows()):
@@ -439,7 +422,7 @@ if uploaded_file:
                 with col_gen2:
                     if st.button(f"✨ Generuj H1 ({count_selected})"):
                         if count_selected == 0:
-                            st.warning("Wybierz URL-e z listy powyżej")
+                            st.warning("Zaznacz wiersze w kolumnie 'Generate'")
                         else:
                             progress_bar = st.progress(0)
                             for idx, (index, row) in enumerate(selected_rows.iterrows()):
@@ -451,7 +434,7 @@ if uploaded_file:
                 with col_gen3:
                     if st.button(f"✨ Generuj Meta Desc ({count_selected})"):
                         if count_selected == 0:
-                            st.warning("Wybierz URL-e z listy powyżej")
+                            st.warning("Zaznacz wiersze w kolumnie 'Generate'")
                         else:
                             progress_bar = st.progress(0)
                             for idx, (index, row) in enumerate(selected_rows.iterrows()):
