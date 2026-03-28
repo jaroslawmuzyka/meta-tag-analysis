@@ -10,11 +10,16 @@ st.set_page_config(page_title="Meta Tag AI Analyzer", page_icon="🤖", layout="
 
 def check_password():
     """Zabezpieczenie hasłem."""
-    if st.secrets.get("APP_PASSWORD") is None:
+    try:
+        app_password = st.secrets.get("APP_PASSWORD")
+    except Exception:
+        app_password = None
+
+    if not app_password:
         return True # Jeśli hasło nie jest ustawione w secrets, pomiń (dla dev)
         
     def password_entered():
-        if st.session_state["password"] == st.secrets["APP_PASSWORD"]:
+        if st.session_state["password"] == app_password:
             st.session_state["password_correct"] = True
             del st.session_state["password"]
         else:
@@ -182,12 +187,40 @@ def load_and_process_data(file):
 st.title("🤖 Meta Tag AI Generator & Analyzer")
 st.markdown("Wgraj plik XLSX (eksport z Ahrefs/Senuto + dane ze Screaming Frog), zanalizuj braki słów kluczowych i wygeneruj nowe meta tagi przy pomocy AI.")
 
+st.info("Narzędzie identyfikuje luki w optymalizacji meta tagów (Title/H1) poprzez porównanie widoczności słów kluczowych z Ahrefs z Title/H1. Jeśli Title lub H1 nie zawierają słów widocznych w Ahrefs - mamy potencjał do dofrazowania.")
+
+with st.expander("📌 Przykład zastosowania"):
+    st.markdown("""
+    Pobierz z Ahrefs słowa kluczowe znajdujące się na pozycjach 4-20 z wolumenem powyżej 50. 
+    Sprawdź jakie adresy są widoczne na te frazy i wrzuć je do Screaming Frog żeby pobrać Title, H1, Meta description.
+    Wgraj wszystko do narzędzia aby uzyskać informacje o brakujących frazach w title/h1.
+    """)
+
+with st.expander("📖 Instrukcje"):
+    st.markdown("""
+    - Pobierz z Ahrefs słowa kluczowe (np. na pozycjach 4-20, wolumen powyżej 50)
+    - Dla adresów widocznych w Ahrefs pobierz ze Screaming Frog: Title, H1, Meta description.
+    - Połącz wszystko w jeden plik z kolumnami:
+        - Keyword    
+        - Volume    
+        - Current position    
+        - Current URL    
+        - Title 1    
+        - H1-1    
+        - Meta Description 1
+    """)
+
 with st.sidebar:
     st.header("⚙️ Ustawienia")
     
     # API Key Handling
     user_api_key = st.text_input("OpenAI API Key", type="password", help="Podaj swój klucz, jeśli nie jest ustawiony globalnie.")
-    api_key = user_api_key if user_api_key else st.secrets.get("OPENAI_API_KEY")
+    api_key = user_api_key
+    if not api_key:
+        try:
+            api_key = st.secrets.get("OPENAI_API_KEY")
+        except Exception:
+            api_key = None
     
     language = st.selectbox("Język generowania", ["pl", "en", "de", "es", "fr"], index=0)
     
