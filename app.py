@@ -215,7 +215,7 @@ def load_and_process_data(file):
         # GRUPOWANIE PO URL
         df_grouped = df.groupby('Current URL').agg({
             'Keyword': lambda x: list(x),
-            'Keyword_Info': lambda x: list(x),
+            'Keyword_Info': lambda x: "\n".join(list(x)),
             'Volume': 'sum', # Suma wolumenu dla wszystkich fraz URL-a
             'Title 1': 'first',
             'H1-1': 'first',
@@ -333,17 +333,29 @@ if uploaded_file:
              df_view = df_view[(df_view['Missing in Title'] > 0) | (df_view['Missing in H1'] > 0)]
 
         # TWORZYMY ZAKŁADKI W UI
-        tab1, tab2, tab3 = st.tabs(["📊 Analiza Zbiorcza", "🔍 Inspektor URL (Różdżka i Detale)", "⚙️ Edytuj Prompty"])
+        tab1, tab2, tab3 = st.tabs(["📊 Analiza Zbiorcza", "🔍 Analiza konkretnego URL", "⚙️ Edytuj Prompty"])
         
         with tab1:
             # --- GŁÓWNA TABELA (DATA EDITOR) ---
-            st.subheader(f"📊 Analiza ({len(df_view)} adresów URL)")
+            col_h1, col_h2 = st.columns([3, 1])
+            with col_h1:
+                st.subheader(f"📊 Analiza ({len(df_view)} adresów URL)")
+            with col_h2:
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                    st.session_state['df_main'].to_excel(writer, index=False, sheet_name='Analiza')
+                st.download_button(
+                    label="📥 Pobierz wyniki (.xlsx)",
+                    data=output.getvalue(),
+                    file_name="meta_tags_analysis_ai.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
             
             column_config = {
                 "Generate": st.column_config.CheckboxColumn("Zaznacz", help="Zaznacz do generowania AI", default=False),
                 "Current URL": st.column_config.LinkColumn("URL"),
                 "Volume": st.column_config.NumberColumn("Total Vol", format="%d"),
-                "Keyword_Info": st.column_config.ListColumn("Fazy (poz, vol)"),
+                "Keyword_Info": st.column_config.TextColumn("Fazy (poz, vol)", width="large"),
                 "All Keywords": st.column_config.ListColumn("Keywords"),
                 "Title 1": st.column_config.TextColumn("Current Title", width="medium"),
                 "H1-1": st.column_config.TextColumn("Current H1", width="medium"),
@@ -419,10 +431,10 @@ if uploaded_file:
                 row_inspect = st.session_state['df_main'][st.session_state['df_main']['Current URL'] == inspect_url].iloc[0]
                 idx_main = st.session_state['df_main'].index[st.session_state['df_main']['Current URL'] == inspect_url].tolist()[0]
                 kws = row_inspect['All Keywords']
-                kw_infos = row_inspect['Keyword_Info']
+                kw_infos = row_inspect['Keyword_Info'].split('\n')
                 
-                c1, c2, c3 = st.columns(3)
-                with c1:
+                col_left, col_right = st.columns([2, 1])
+                with col_left:
                     st.markdown("### Title 1")
                     missing_t = get_missing_keywords(kws, row_inspect['Title 1'])
                     st.markdown(f"**Obecny:** {highlight_text(row_inspect['Title 1'], kws)}", unsafe_allow_html=True)
@@ -441,7 +453,7 @@ if uploaded_file:
                                 st.session_state['df_main'].at[idx_main, 'AI Title'] = generate_ai_content(row_inspect, "Title", language, api_key)
                             st.rerun()
 
-                with c2:
+                    st.markdown("---")
                     st.markdown("### H1")
                     missing_h = get_missing_keywords(kws, row_inspect['H1-1'])
                     st.markdown(f"**Obecny:** {highlight_text(row_inspect['H1-1'], kws)}", unsafe_allow_html=True)
@@ -460,12 +472,6 @@ if uploaded_file:
                                 st.session_state['df_main'].at[idx_main, 'AI H1'] = generate_ai_content(row_inspect, "H1", language, api_key)
                             st.rerun()
 
-                with c3:
-                    st.markdown("### Słowa Kluczowe")
-                    st.write(f"Suma wolumenu: **{row_inspect['Volume']}**")
-                    for kwi in kw_infos:
-                        st.markdown(f"- {kwi}")
-
                     st.markdown("---")
                     st.markdown("### Meta Description")
                     st.markdown(f"**Obecny:** {row_inspect['Meta Description 1']}")
@@ -478,6 +484,12 @@ if uploaded_file:
                             with st.spinner("Generowanie..."):
                                 st.session_state['df_main'].at[idx_main, 'AI Meta Description'] = generate_ai_content(row_inspect, "Meta Description", language, api_key)
                             st.rerun()
+
+                with col_right:
+                    st.markdown("### Słowa Kluczowe")
+                    st.write(f"Suma wolumenu: **{row_inspect['Volume']}**")
+                    for kwi in kw_infos:
+                        st.markdown(f"- {kwi}")
 
         with tab3:
             st.subheader("⚙️ Edytuj Prompty Systemowe")
@@ -497,17 +509,4 @@ if uploaded_file:
                 }
                 st.success("Prompty zostały zaktualizowane! Teraz Magiczna Różdżka i Tablica Zbiorcza będzie korzystać z nowych instrukcji.")
 
-        # --- EKSPORT ---
-        st.divider()
-        st.subheader("📥 Eksport")
-        
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            st.session_state['df_main'].to_excel(writer, index=False, sheet_name='Analiza')
-        
-        st.download_button(
-            label="Pobierz wyniki (.xlsx)",
-            data=output.getvalue(),
-            file_name="meta_tags_analysis_ai.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+        # END OF UI
