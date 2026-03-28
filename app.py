@@ -371,37 +371,49 @@ if uploaded_file:
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
 
-            column_config = {
-                "Generate": st.column_config.CheckboxColumn("Zaznacz", help="Zaznacz do generowania AI", default=False),
-                "Current URL": st.column_config.LinkColumn("URL"),
-                "Volume": st.column_config.NumberColumn("Total Vol", format="%d"),
-                "Keyword_Info": st.column_config.ListColumn("Frazy i Pokrycie (T/H/M)"),
-                "All Keywords": st.column_config.ListColumn("Keywords"),
-                "Title 1": st.column_config.TextColumn("Current Title", width="medium"),
-                "H1-1": st.column_config.TextColumn("Current H1", width="medium"),
-                "Meta Description 1": st.column_config.TextColumn("Current Meta Desc", width="medium"),
-                "AI Title": st.column_config.TextColumn("AI Title", width="medium"),
-                "AI H1": st.column_config.TextColumn("AI H1", width="medium"),
-                "AI Meta Description": st.column_config.TextColumn("AI Meta", width="medium"),
-            }
-            
-            # Wyświetlamy edytowalną tabelę
-            edited_df = st.data_editor(
-                df_view,
-                column_config=column_config,
-                use_container_width=True,
-                hide_index=True,
-                disabled=["Current URL", "Volume", "All Keywords", "Keyword_Info", "Missing in Title", "Missing in H1"], 
-                column_order=["Generate", "Current URL", "Volume", "Keyword_Info", "Title 1", "AI Title", "H1-1", "AI H1", "Meta Description 1", "AI Meta Description"]
-            )
+            st.markdown("""
+            <div style="display:flex; font-weight:bold; border-bottom:2px solid #ccc; padding-bottom:10px; margin-bottom:10px; font-size:14px;">
+                <div style="width:5%;">Zaznacz</div>
+                <div style="width:25%;">URL & Wolumen</div>
+                <div style="width:30%;">Frazy (T/H/M)</div>
+                <div style="width:20%;">Obecne (T/H/M)</div>
+                <div style="width:20%;">AI (T/H/M)</div>
+            </div>
+            """, unsafe_allow_html=True)
 
-            st.session_state['df_main'].update(edited_df)
+            selected_indices = []
+            
+            for idx, row in df_view.iterrows():
+                c1, c2, c3, c4, c5 = st.columns([0.5, 2.5, 3.0, 2.0, 2.0])
+                with c1:
+                    is_selected = st.checkbox(" ", key=f"gen_{idx}", label_visibility="collapsed")
+                    if is_selected:
+                        selected_indices.append(idx)
+                with c2:
+                    st.markdown(f"<div style='font-size:12px; word-break:break-all;'><a href='{row['Current URL']}' target='_blank'>{row['Current URL']}</a></div>", unsafe_allow_html=True)
+                    st.markdown(f"<div style='font-size:12px; color:#555;'>Wolumen: <b>{int(row['Volume'])}</b></div>", unsafe_allow_html=True)
+                with c3:
+                    kw_html = "<br>".join([f"<span style='white-space:nowrap'>{kw}</span>" for kw in row['Keyword_Info']])
+                    st.markdown(f"<div style='font-size:12px; line-height:1.4;'>{kw_html}</div>", unsafe_allow_html=True)
+                with c4:
+                    st.markdown(f"<div style='font-size:11px; margin-bottom:4px;'><b>T:</b> {row['Title 1']}</div>", unsafe_allow_html=True)
+                    st.markdown(f"<div style='font-size:11px; margin-bottom:4px;'><b>H:</b> {row['H1-1']}</div>", unsafe_allow_html=True)
+                    st.markdown(f"<div style='font-size:11px;'><b>M:</b> {row['Meta Description 1']}</div>", unsafe_allow_html=True)
+                with c5:
+                    ai_t = row['AI Title'] if row['AI Title'] else "—"
+                    ai_h = row['AI H1'] if row['AI H1'] else "—"
+                    ai_m = row['AI Meta Description'] if row['AI Meta Description'] else "—"
+                    st.markdown(f"<div style='font-size:11px; margin-bottom:4px; color:#1a7a3c;'><b>T:</b> {ai_t}</div>", unsafe_allow_html=True)
+                    st.markdown(f"<div style='font-size:11px; margin-bottom:4px; color:#1a7a3c;'><b>H:</b> {ai_h}</div>", unsafe_allow_html=True)
+                    st.markdown(f"<div style='font-size:11px; color:#1a7a3c;'><b>M:</b> {ai_m}</div>", unsafe_allow_html=True)
+                
+                st.markdown("<hr style='margin:10px 0;'>", unsafe_allow_html=True)
 
             # --- SEKCJA GENEROWANIA AI ---
             st.divider()
             col_gen1, col_gen2, col_gen3 = st.columns(3)
             
-            selected_rows = edited_df[edited_df['Generate'] == True]
+            selected_rows = st.session_state['df_main'].loc[selected_indices]
             count_selected = len(selected_rows)
 
             if not api_key:
@@ -410,37 +422,37 @@ if uploaded_file:
                 with col_gen1:
                     if st.button(f"✨ Generuj Title ({count_selected})"):
                         if count_selected == 0:
-                            st.warning("Zaznacz wiersze w kolumnie 'Generate'")
+                            st.warning("Zaznacz wiersze (checkbox)")
                         else:
                             progress_bar = st.progress(0)
-                            for idx, (index, row) in enumerate(selected_rows.iterrows()):
+                            for i, (index, row) in enumerate(selected_rows.iterrows()):
                                 new_val = generate_ai_content(row, "Title", language, api_key)
                                 st.session_state['df_main'].at[index, 'AI Title'] = new_val
-                                progress_bar.progress((idx + 1) / count_selected)
+                                progress_bar.progress((i + 1) / count_selected)
                             st.rerun()
 
                 with col_gen2:
                     if st.button(f"✨ Generuj H1 ({count_selected})"):
                         if count_selected == 0:
-                            st.warning("Zaznacz wiersze w kolumnie 'Generate'")
+                            st.warning("Zaznacz wiersze (checkbox)")
                         else:
                             progress_bar = st.progress(0)
-                            for idx, (index, row) in enumerate(selected_rows.iterrows()):
+                            for i, (index, row) in enumerate(selected_rows.iterrows()):
                                 new_val = generate_ai_content(row, "H1", language, api_key)
                                 st.session_state['df_main'].at[index, 'AI H1'] = new_val
-                                progress_bar.progress((idx + 1) / count_selected)
+                                progress_bar.progress((i + 1) / count_selected)
                             st.rerun()
 
                 with col_gen3:
                     if st.button(f"✨ Generuj Meta Desc ({count_selected})"):
                         if count_selected == 0:
-                            st.warning("Zaznacz wiersze w kolumnie 'Generate'")
+                            st.warning("Zaznacz wiersze (checkbox)")
                         else:
                             progress_bar = st.progress(0)
-                            for idx, (index, row) in enumerate(selected_rows.iterrows()):
+                            for i, (index, row) in enumerate(selected_rows.iterrows()):
                                 new_val = generate_ai_content(row, "Meta Description", language, api_key)
                                 st.session_state['df_main'].at[index, 'AI Meta Description'] = new_val
-                                progress_bar.progress((idx + 1) / count_selected)
+                                progress_bar.progress((i + 1) / count_selected)
                             st.rerun()
 
 
