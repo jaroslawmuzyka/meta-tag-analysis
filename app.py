@@ -52,11 +52,36 @@ def normalize_string(text):
         text = text.replace(k, v)
     return text
 
+def find_best_word_match(word, text_words_norm):
+    """Zwraca (najlepszy_wspolczynnik, najlepsze_slowo_z_tekstu) dla danego słowa w liście słów."""
+    norm_word = normalize_string(word)
+    best_ratio = 0.0
+    best_match = None
+    for tw in text_words_norm:
+        ratio = difflib.SequenceMatcher(None, norm_word, tw).ratio()
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_match = tw
+    return best_ratio, best_match
+
 def check_keyword_presence(text, keyword):
-    """Sprawdza czy słowo kluczowe występuje w tekście (fuzzy matching uproszczony)."""
-    norm_text = normalize_string(text)
-    norm_kw = normalize_string(keyword)
-    return norm_kw in norm_text
+    """Sprawdza czy KAŻDE słowo z frazy kluczowej znajduje się w tekście (niezależnie od kolejności).
+    Dla słów > 3 znaki: fuzzy matching (próg 0.78). Dla krótszych: dokładne."""
+    if not isinstance(text, str) or not isinstance(keyword, str):
+        return False
+    text_words_norm = [normalize_string(w) for w in re.split(r'\W+', text) if w]
+    kw_words = [w for w in keyword.split() if w]
+    for kw_w in kw_words:
+        norm_kw_w = normalize_string(kw_w)
+        if len(norm_kw_w) <= 3:
+            # dokładne dopasowanie dla krótkich słów
+            if norm_kw_w not in text_words_norm:
+                return False
+        else:
+            ratio, _ = find_best_word_match(kw_w, text_words_norm)
+            if ratio < 0.78:
+                return False
+    return True
 
 def get_missing_keywords(keywords_list, text):
     """Zwraca listę słów kluczowych, których brakuje w tekście."""
@@ -66,21 +91,57 @@ def get_missing_keywords(keywords_list, text):
             missing.append(kw)
     return missing
 
+def highlight_word_fuzzy(kw_word, text):
+    """Zwraca HTML: dla każdego słowa z frazy kluczowej koloruje
+    - pasujący rdzeń na zielono, niepasującą końcówkę na czerwono (gdy > 3 znaki).
+    - całe słowo zielono gdy dokładne; całe czerwono gdy brak trafu."""
+    if not isinstance(text, str):
+        text = ""
+    text_words_norm = [normalize_string(w) for w in re.split(r'\W+', text) if w]
+    result_parts = []
+    kw_words = kw_word.split()
+    for word in kw_words:
+        norm_w = normalize_string(word)
+        if len(norm_w) <= 3:
+            # krótkie słowo - dokładne
+            if norm_w in text_words_norm:
+                result_parts.append(f"<span style='color:green;font-weight:bold'>{word}</span>")
+            else:
+                result_parts.append(f"<span style='color:red;font-weight:bold'>{word}</span>")
+        else:
+            ratio, best_tw = find_best_word_match(word, text_words_norm)
+            if ratio >= 0.99:
+                # Idealne dopasowanie
+                result_parts.append(f"<span style='color:green;font-weight:bold'>{word}</span>")
+            elif ratio >= 0.78 and best_tw:
+                # Częściowe - znajdź wspólny prefiks przez SequenceMatcher na znakach
+                sm = difflib.SequenceMatcher(None, normalize_string(word), best_tw)
+                blocks = sm.get_matching_blocks()
+                # Zbieramy które indeksy w 'word' są dopasowane
+                matched_indices = set()
+                for block in blocks:
+                    a_start, b_start, length = block
+                    for i in range(a_start, a_start + length):
+                        matched_indices.add(i)
+                html_word = ""
+                for i, ch in enumerate(word):
+                    if i in matched_indices:
+                        html_word += f"<span style='color:green;font-weight:bold'>{ch}</span>"
+                    else:
+                        html_word += f"<span style='color:red;font-weight:bold'>{ch}</span>"
+                result_parts.append(html_word)
+            else:
+                result_parts.append(f"<span style='color:red;font-weight:bold'>{word}</span>")
+    return " ".join(result_parts)
+
 def highlight_text(text, keywords):
     """Koloruje znalezione słowa na zielono, a resztę tekstu zostawia."""
     if not isinstance(text, str): return ""
-    
-    # To prosta implementacja, dla pełnego HTML w Streamlit trzeba uważać
-    # Tutaj po prostu zwracamy HTML do wyświetlenia w st.markdown
     highlighted = text
-    # Sortujemy słowa od najdłuższego, żeby nie podmienić fragmentów
     sorted_kws = sorted(keywords, key=len, reverse=True)
-    
     for kw in sorted_kws:
-        # Regex case insensitive replacement
         pattern = re.compile(re.escape(kw), re.IGNORECASE)
         highlighted = pattern.sub(f"<span style='color:green; font-weight:bold'>{kw}</span>", highlighted)
-        
     return highlighted
 
 def visualize_diff(original, new_val):
@@ -337,6 +398,11 @@ if uploaded_file:
              df_view = df_view[(df_view['Missing in Title'] > 0) | (df_view['Missing in H1'] > 0)]
 
         # TWORZYMY ZAKŁADKI W UI
+        st.markdown("""
+        <style>
+            .stTabs [data-baseweb="tab"] { font-size: 17px !important; font-weight: 600; padding: 10px 20px; }
+        </style>
+        """, unsafe_allow_html=True)
         tab1, tab2, tab3 = st.tabs(["📊 Analiza Zbiorcza", "🔍 Analiza konkretnego URL", "⚙️ Edytuj Prompty"])
         
         with tab1:
@@ -357,26 +423,31 @@ if uploaded_file:
 
             # --- PAGINACJA NAD TABELĄ ---
             total_items = len(df_view)
-            col_page1, col_page2, col_page3 = st.columns([2, 5, 2])
-            
-            with col_page1:
-                items_per_page = st.selectbox("Wierszy na stronę:", [10, 50, 100, 200, 500, 1000], index=2)
-                
-            total_pages = max(1, (total_items - 1) // items_per_page + 1) if total_items > 0 else 1
-            
-            with col_page2:
-                # Wyśrodkowanie tekstu z ilością wyświetlanych URL-i
-                st.write("")
-                if total_items > 0:
-                    start_idx = (st.session_state.get("current_page_no", 1) - 1) * items_per_page
-                    end_idx = min(start_idx + items_per_page, total_items)
-                    st.markdown(f"<div style='text-align:center; padding-top:8px;'><b>Wyświetlam {start_idx + 1}-{end_idx} z {total_items} adresów URL</b></div>", unsafe_allow_html=True)
-                else:
-                    st.markdown("<div style='text-align:center; padding-top:8px;'><b>Brak wyników.</b></div>", unsafe_allow_html=True)
+            pag_col1, pag_col2, pag_col3, pag_col4, pag_col5 = st.columns([2, 1, 1, 1, 2])
 
-            with col_page3:
-                current_page = st.number_input("Strona", min_value=1, max_value=total_pages, value=1, key="current_page_no")
-                
+            with pag_col1:
+                items_per_page = st.selectbox("Wierszy na stronę:", [10, 50, 100, 200, 500, 1000], index=2, key="ipp_top")
+
+            total_pages = max(1, (total_items - 1) // items_per_page + 1) if total_items > 0 else 1
+            if 'current_page_no' not in st.session_state:
+                st.session_state['current_page_no'] = 1
+            current_page = max(1, min(st.session_state['current_page_no'], total_pages))
+
+            with pag_col2:
+                if st.button("◀ Poprz.", key="prev_page_top", disabled=(current_page <= 1)):
+                    st.session_state['current_page_no'] = current_page - 1
+                    st.rerun()
+            with pag_col3:
+                st.markdown(f"<div style='text-align:center;padding-top:8px'><b>{current_page} / {total_pages}</b></div>", unsafe_allow_html=True)
+            with pag_col4:
+                if st.button("Nast. ▶", key="next_page_top", disabled=(current_page >= total_pages)):
+                    st.session_state['current_page_no'] = current_page + 1
+                    st.rerun()
+            with pag_col5:
+                start_idx = (current_page - 1) * items_per_page
+                end_idx = min(start_idx + items_per_page, total_items)
+                st.markdown(f"<div style='text-align:right;padding-top:8px;font-size:13px'>Wyświetlam <b>{start_idx+1}–{end_idx}</b> z <b>{total_items}</b></div>", unsafe_allow_html=True)
+
             start_idx = (current_page - 1) * items_per_page
             end_idx = min(start_idx + items_per_page, total_items)
             df_page = df_view.iloc[start_idx:end_idx]
@@ -452,12 +523,19 @@ if uploaded_file:
                     target_m = row['AI Meta Description'] if row['AI Meta Description'] else row['Meta Description 1']
                     
                     for kw_info, kw_word in zip(row['Keyword_Info'], row['All Keywords']):
-                        t_icon = "✅" if check_keyword_presence(target_t, kw_word) else "❌"
-                        h_icon = "✅" if check_keyword_presence(target_h, kw_word) else "❌"
-                        m_icon = "✅" if check_keyword_presence(target_m, kw_word) else "❌"
-                        
+                        t_ok = check_keyword_presence(target_t, kw_word)
+                        h_ok = check_keyword_presence(target_h, kw_word)
+                        m_ok = check_keyword_presence(target_m, kw_word)
+                        t_icon = "✅" if t_ok else "❌"
+                        h_icon = "✅" if h_ok else "❌"
+                        m_icon = "✅" if m_ok else "❌"
+                        # podświetlenie frazy wg najlepszego trafu
+                        best_text = target_t if t_ok else (target_h if h_ok else (target_m if m_ok else ""))
+                        kw_highlighted = highlight_word_fuzzy(kw_word, best_text)
                         badges = f"<span style='font-size:11px; color:#555;'>[Title: {t_icon} | H1: {h_icon} | Meta description: {m_icon}]</span>"
-                        kw_html_lines.append(f"<div style='margin-bottom:14px; line-height:1.4;'><b>{kw_info}</b><br>{badges}</div>")
+                        # kw_info contains (poz: X, vol: Y) - wyświetl z podświetleniem
+                        vol_part = kw_info[len(kw_word):] if kw_info.startswith(kw_word) else ""
+                        kw_html_lines.append(f"<div style='margin-bottom:14px; line-height:1.4;'><b>{kw_highlighted}{vol_part}</b><br>{badges}</div>")
                     
                     st.markdown("".join(kw_html_lines), unsafe_allow_html=True)
                 with c4:
@@ -494,6 +572,31 @@ if uploaded_file:
                 
                 st.markdown("<hr style='margin:15px 0; border-color:#eaeaea;'>", unsafe_allow_html=True)
 
+            # --- PAGINACJA I EXPORT POD TABELĄ ---
+            st.markdown("<hr style='margin:10px 0;'>", unsafe_allow_html=True)
+            bot_c1, bot_c2, bot_c3, bot_c4 = st.columns([2, 1, 1, 2])
+            with bot_c1:
+                st.markdown(f"<div style='padding-top:10px; font-size:13px;'><b>Wyświetlam {start_idx+1}–{end_idx} z {total_items}</b></div>", unsafe_allow_html=True)
+            with bot_c2:
+                if st.button("◀ Poprzednia", key="prev_page_bot", disabled=(current_page <= 1)):
+                    st.session_state['current_page_no'] = current_page - 1
+                    st.rerun()
+            with bot_c3:
+                if st.button("Następna ▶", key="next_page_bot", disabled=(current_page >= total_pages)):
+                    st.session_state['current_page_no'] = current_page + 1
+                    st.rerun()
+            with bot_c4:
+                output2 = io.BytesIO()
+                with pd.ExcelWriter(output2, engine='xlsxwriter') as writer:
+                    st.session_state['df_main'].to_excel(writer, index=False, sheet_name='Analiza')
+                st.download_button(
+                    label="📥 Pobierz wyniki (.xlsx)",
+                    data=output2.getvalue(),
+                    file_name="meta_tags_analysis_ai.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="dl_bot"
+                )
+
 
         with tab2:
             # --- SZCZEGÓŁOWY PODGLĄD (INSPEKTOR) ---
@@ -511,7 +614,7 @@ if uploaded_file:
                 with col_left:
                     st.markdown("### Title 1")
                     missing_t = get_missing_keywords(kws, row_inspect['Title 1'])
-                    st.markdown(f"**Obecny:** {highlight_text(row_inspect['Title 1'], kws)}", unsafe_allow_html=True)
+                    st.markdown(f"**Obecny:** {highlight_text(str(row_inspect['Title 1']), kws)}", unsafe_allow_html=True)
                     if missing_t:
                         st.markdown(f"❌ **Brakuje:** {', '.join(missing_t)}")
                     else:
@@ -530,7 +633,7 @@ if uploaded_file:
                     st.markdown("---")
                     st.markdown("### H1")
                     missing_h = get_missing_keywords(kws, row_inspect['H1-1'])
-                    st.markdown(f"**Obecny:** {highlight_text(row_inspect['H1-1'], kws)}", unsafe_allow_html=True)
+                    st.markdown(f"**Obecny:** {highlight_text(str(row_inspect['H1-1']), kws)}", unsafe_allow_html=True)
                     if missing_h:
                         st.markdown(f"❌ **Brakuje:** {', '.join(missing_h)}")
                     else:
@@ -548,7 +651,7 @@ if uploaded_file:
 
                     st.markdown("---")
                     st.markdown("### Meta Description")
-                    st.markdown(f"**Obecny:** {row_inspect['Meta Description 1']}")
+                    st.markdown(f"**Obecny:** {str(row_inspect['Meta Description 1'])}")
                     if row_inspect['AI Meta Description']:
                         st.markdown(f"<br>🤖 **AI (Diff):**<br> {visualize_diff(row_inspect['Meta Description 1'], row_inspect['AI Meta Description'])}", unsafe_allow_html=True)
                     
